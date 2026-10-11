@@ -210,6 +210,7 @@ struct ViewSidebar: View {
                     Image(systemName: store.active ? "cable.connector" : "cable.connector.slash").font(.title2)
                 }
                 Text(store.busy ? "…" : store.active ? "DIRECT" : "CONNECTER").font(.caption2.bold())
+                    .lineLimit(1).minimumScaleFactor(0.7)
             }
             .frame(width: 64, height: 56)
             .foregroundStyle(store.active ? Color.black : Color.primary)
