@@ -1,7 +1,10 @@
 # ES-9 Mixer
 
-Console native macOS 13+ pour les 14 entrées analogiques de l'Expert Sleepers ES-9.
-SwiftUI et CoreMIDI, sans dépendance externe ni moteur audio sur le Mac.
+Console native macOS 13+ pour les 13 entrées audio mixables de l'Expert Sleepers ES-9.
+L'entrée analogique 14 est réservée à la réception d'un signal CLOCK et n'est pas
+affichée ni routée par la console ; sa détection pourra être ajoutée ultérieurement.
+SwiftUI et CoreMIDI, sans dépendance externe. CoreAudio génère uniquement le
+GATE continu pour Pamela ; les signaux audio restent mélangés dans l'ES-9.
 
 ## Lancer
 
@@ -52,7 +55,7 @@ mémorisation est ouverte.
 6. Vérifier avec une seule source audio, puis ajouter les autres progressivement.
 
 Les faders d'entrée sont limités à 0 dB, démarrent à -18 dB et le général à -12 dB.
-Les huit faders de sortie jack démarrent à 0 dB pour conserver les niveaux des
+Les sept faders de sortie audio jack démarrent à 0 dB pour conserver les niveaux des
 sessions précédentes ; ils atténuent ensuite le mélange affecté à chaque sortie.
 Les sources sont additionnées : ces précautions ne garantissent pas l'absence de
 saturation. Il n'y a pas de vumètre simulé ou de limiteur.
@@ -102,6 +105,157 @@ Les autres trajets ne sont pas validés par ce seul essai. Une relecture confirm
 les réglages, pas la présence du son. Si l'outil officiel a été utilisé entre
 temps, suspendre puis réactiver la console pour remettre son routage en place.
 
+## Ordre des entrées
+
+Dans les vues **Console** et **Strip**, un petit bandeau cyan en haut de chaque
+bloc réunit le numéro de l'entrée et la poignée **≡**. Glisser ce bandeau
+sur un autre bloc, puis relâcher la souris : l'entrée prend sa
+position et les autres se décalent. Le bloc cible est surligné en cyan.
+Le déplacement est appliqué au dépôt ; relâcher hors des blocs ne change rien.
+Toute la largeur du bandeau permet le déplacement, plutôt que les faders ou les potards, qui restent dédiés
+aux réglages audio. Le glisser-déposer reste à l'intérieur de la vue courante.
+
+Les deux vues conservent des dispositions indépendantes. En **Strip**, utiliser
+d'abord le sélecteur **Entrée** si l'entrée souhaitée ne figure pas parmi les
+quatre tranches. La sélection des strips et les deux ordres sont sauvegardés
+automatiquement, ainsi que dans les fichiers de session.
+
+Ce changement est uniquement visuel : numéros physiques, noms, réglages audio,
+routage et banques du Launch Control restent associés aux mêmes entrées.
+La matrice conserve l'ordre numérique 1 à 13. Les anciennes sessions s'ouvrent
+avec la console dans l'ordre 1 à 13 et les strips sur les entrées 10 à 13.
+
+## Séquenceur live
+
+La vue **LIVE** organise un set en scènes et sous-scènes ordonnées. Une scène
+et ses sous-scènes sont sélectionnables dans la colonne de gauche. Les commandes
+de transport restent fixes au-dessus des réglages ; seuls la liste des scènes
+et les réglages des entrées défilent, dans deux zones distinctes.
+Charger une scène affiche sa première sous-scène sans modifier le mix. Une scène
+contient au moins une sous-scène ; **GO** applique celle qui est sélectionnée,
+et **NEXT** avance à la sous-scène suivante. À la fin d'une scène, NEXT passe à
+la première sous-scène de la scène suivante. À la fin du set, la dernière
+sous-scène reste en place : le set ne boucle pas. **Réarmer** replace le
+séquenceur au début sans modifier le mix en cours. NEXT avant le premier GO
+applique la première sous-scène.
+
+Chaque sous-scène peut avoir une durée au format **MM:SS**. À l'expiration,
+la lecture passe automatiquement à la sous-scène suivante ; **00:00** désactive
+le timer. Le compte à rebours de la sous-scène active est affiché dans l'éditeur,
+et chaque scène indique le total des durées de ses sous-scènes.
+
+Une nouvelle sous-scène reprend les entrées, niveaux et envois de la sous-scène
+précédente avec toutes les transitions à 0 seconde.
+
+Les entrées des sous-scènes suivent l'ordre des pistes de la vue **Console**.
+Déplacer une piste dans la console actualise aussi son affichage dans LIVE,
+sans changer son numéro physique ni ses réglages dans les sous-scènes.
+Chaque entrée occupe une ligne, avec les quatre potards et boutons ON/OFF
+**OUT 1–4** identiques à ceux de Strip. Les entrées désactivées sont réduites
+à leur nom et leur bouton d'activation ; réactiver une entrée affiche ses
+réglages, sans perdre les niveaux, durées ou envois mémorisés.
+Les envois sont mémorisés par sous-scène
+et appliqués au GO/NEXT sans interpolation ; les sorties audio 5–7 et l'envoi au
+général sont conservés. Déverrouiller le routage pour modifier les boutons
+ON/OFF pendant la préparation. Le rappel reste autorisé avec le verrou actif.
+Le routage complet est validé avant le rappel : s'il dépasse les capacités
+du module, le rappel est refusé sans modifier le mix ni la position du set.
+Un changement de liaisons peut provoquer une brève interruption audio.
+Les anciennes sous-scènes sans routage mémorisé conservent le routage courant ;
+modifier un potard ou un bouton mémorise les quatre envois de cette entrée.
+
+Chaque sous-scène définit, pour chacune des 13 entrées audio, si elle est utilisée,
+son niveau cible et sa durée de transition (0 à 30 secondes). Les anciennes
+durées sauvegardées au-delà de 30 secondes sont ramenées à 30 à l'ouverture.
+Une entrée
+désactivée est amenée à −∞ puis mutée à la fin de sa transition ; son niveau
+cible est conservé sous le mute. Une entrée activée avec une transition programmée
+démarre toujours à −∞, quel que soit son niveau courant, puis monte vers son
+niveau cible pendant la durée prévue. Relancer **GO** recommence cette montée
+depuis le silence. Les rampes sont linéaires en gain (amplitude) et non en dB : le
+son est audible dès le début de chaque transition, indépendamment des autres
+entrées. Les transitions sont indépendantes par entrée ; 0 seconde
+applique le changement immédiatement, sans passage par le silence, même si
+d'autres entrées ont une transition. **Capturer le mix**
+copie les mutes, niveaux et envois OUT 1–4 actuels dans la sous-scène, sans remplacer les
+durées. **SAVE**, affiché en rouge, enregistre les modifications de la sous-scène
+et de ses noms dans la session. Créer une scène commence avec toutes ses entrées
+désactivées ; créer une sous-scène reprend les réglages de la précédente.
+
+Pendant la lecture, les faders de Console et Strip affichent la valeur cible de
+la sous-scène ; pendant une transition, un repère rouge indique le niveau
+intermédiaire réellement appliqué. Les faders, mutes et solos
+des entrées restent accessibles dans **SCENE**, Console/Strip et sur le contrôleur
+MIDI, à l'exception des envois OUT 1–4 du mix, verrouillés pendant la lecture.
+Dans **SCENE**, le fader agit immédiatement sur le mix et modifie aussi le niveau
+programmé de la sous-scène affichée, même avant **GO**. Les boutons **MUTE** et
+**SOLO** par entrée agissent immédiatement sur le mix, sans changer la programmation
+de la sous-scène. Le SOLO est cumulatif ; MUTE et MUTE ALL restent prioritaires.
+Le fader reste accessible pour une entrée désactivée ou mutée, sans la démuter.
+Un changement manuel de niveau ou de mute interrompt uniquement la transition de
+cette entrée ; les autres continuent. **GO/NEXT** reprennent la programmation
+de la sous-scène et effacent les solos d'entrée. En mode Démo, aucun réglage
+n'est envoyé au matériel : activer **DIRECT** pour entendre les changements.
+Les autres réglages restent accessibles. **ARRÊT**
+interrompt la transition, abaisse le GATE et sélectionne la première scène et
+sa première sous-scène, en remontant la liste au début du set. Aucun son n'est
+relancé : les niveaux et le routage atteints sont conservés. Le prochain **GO**
+ou **NEXT** reprend à cette première sous-scène ; les
+valeurs restent alors modifiables manuellement. Modifier l'activation programmée,
+la durée ou les envois d'une sous-scène pendant sa lecture prépare ces valeurs
+pour un prochain **GO**, sans changer la transition déjà lancée.
+Le rattrapage des faders MIDI est réarmé à chaque
+GO/NEXT.
+
+### OUT 8 : GATE Pamela
+
+OUT 8 est exclusivement réservée au signal **RUN** de Pamela. Il reste sept
+sorties audio : OUT 1–4 pour les resends et OUT 5–7 pour VCV. OUT 8 est retirée
+de la matrice, des faders de sortie et du contrôleur MIDI (le huitième contrôle
+de la banque sorties ne fait rien). Les anciens réglages OUT 8 sont conservés
+dans les fichiers pour leur compatibilité, mais leurs liaisons, mutes et solos
+ne participent plus au mix audio.
+
+En **Direct**, **GO** ouvre un client CoreAudio sur l'ES-9 et génère un niveau
+constant de 0,5 sur USB 16, soit environ +5 V sur OUT 8 selon la spécification
+±10 V du module. Tous les autres canaux de ce client reçoivent des zéros :
+il ne capture aucune entrée et ne change ni le périphérique audio par défaut
+du Mac ni les signaux de VCV. **NEXT** maintient le gate haut. **ARRÊT** ramène
+le gate bas en envoyant des zéros sur USB 16 ; le client reste ouvert pour
+maintenir ce niveau jusqu'au prochain GO. Suspension, chargement d'une autre session
+et fermeture de l'application arrêtent également le générateur. En Démo, aucun
+gate n'est envoyé. Si l'ES-9 audio est absent ou si CoreAudio refuse son ouverture,
+GO affiche une erreur et ne lance pas la scène.
+
+**Ne rien brancher sur “To device 16” dans VCV** : un autre client envoyant sur
+USB 16 s'additionnerait au gate et empêcherait de garantir son niveau bas.
+Configurer l'entrée RUN de Pamela pour démarrer tant que le gate est haut.
+La tension physique n'est pas calibrée par logiciel : vérifier OUT 8 et le
+démarrage/arrêt de Pamela sur le matériel avant un live. Ce signal est un gate
+RUN continu, pas un train d'impulsions CLOCK ni une impulsion RESET.
+
+Après **ARRÊT → GO**, chaque entrée active avec transition repart au silence,
+puis remonte à sa cible ; une entrée à 0 seconde reprend immédiatement sa cible.
+
+Les commandes **GO** et **NEXT** fonctionnent en démonstration comme en direct.
+En mode direct, les niveaux intermédiaires sont transmis à l'ES-9 ; son
+lissage natif est activé à l'activation. L'application efface les solos
+d'entrée lors d'un rappel pour que les entrées choisies par la sous-scène soient
+audibles. Le bouton **MUTE GÉNÉRAL** de l'écran Scène (identique au menu
+**MUTE ALL**) coupe les entrées analogiques ; **GO** depuis l'arrêt le désactive
+pour que la scène soit audible. Pendant un set, **NEXT** et les GO suivants
+respectent l'état du mute.
+Le mix analogique est concerné ; le retour USB direct n'est pas modifié. Les
+scènes et leurs réglages sont sauvegardés dans la session, mais la position de
+lecture n'est pas restaurée et aucune scène n'est automatiquement rejouée au
+lancement de l'application.
+
+Pour le contrôleur MIDI, apprendre **Sous-scène suivante** séparément du
+bouton **Banque suivante** : les actions de banque existantes gardent leur
+fonction. L'action NEXT démarre au début si aucune sous-scène n'a encore été
+appliquée ; après la dernière sous-scène, elle maintient le mix et signale la
+fin du set.
+
 ## Vue Strip
 
 La vue **Strip** présente quatre entrées comme des tranches de console analogique
@@ -131,8 +285,8 @@ le général et le casque sont affichés à droite avec des potars de niveau
 ## Matrice de routage
 
 Le sélecteur **Console / Matrice / Strip** change uniquement l'affichage : les vues
-pilotent la même session. La matrice présente les 14 entrées en lignes et les
-8 sorties jack en colonnes. Une entrée peut alimenter plusieurs sorties et
+pilotent la même session. La matrice présente les 13 entrées audio en lignes et les
+7 sorties audio jack en colonnes. Une entrée peut alimenter plusieurs sorties et
 chaque sortie peut recevoir plusieurs entrées.
 
 1. Décocher **Routage verrouillé**.
@@ -151,7 +305,7 @@ Le routage au général se règle dans cette matrice ; la console garde les band
 plus épurées pour privilégier les faders. Décocher une liaison conserve son
 niveau pour sa prochaine activation.
 
-Pour utiliser librement les **112 liaisons simultanées**, cliquer sur
+Pour utiliser librement les **91 liaisons audio simultanées**, cliquer sur
 **Jacks uniquement** et confirmer : cela coupe tous les envois au général
 (donc aussi son écoute casque), sans effacer les liaisons jack ni leurs niveaux.
 Les retours USB directs restent actifs sur toutes leurs destinations.
@@ -159,7 +313,7 @@ Réduire le volume avant les essais : l'addition de sources peut saturer.
 
 Chaque mélangeur interne possède huit destinations mono. Le général en utilise
 deux et son casque deux supplémentaires. L'application cherche une répartition
-des 14 entrées entre les deux mélangeurs, avec chaque entrée dans un seul
+des 13 entrées audio entre les deux mélangeurs, avec chaque entrée dans un seul
 mélangeur. Si aucune répartition ne convient, la modification est refusée avec
 une erreur explicite : la session précédente et le routage matériel sont conservés.
 Cette version ne cascade pas les mélangeurs et ne duplique pas leurs entrées
@@ -177,7 +331,7 @@ Les faders, mutes, solos et envois décrits ici contrôlent uniquement le mix
 analogique, jamais les retours USB directs.
 
 - Chaque entrée a un nom, fader, mute, solo, des envois et un panoramique.
-- Chacune des huit sorties jack a un nom, fader, mute et solo. Son niveau
+- Chacune des sept sorties audio jack a un nom, fader, mute et solo. Son niveau
   multiplie celui de toutes les entrées qui lui sont affectées, sur les deux
   mélangeurs internes. Une sortie sans entrée affectée ne reçoit aucun mix
   analogique, mais peut toujours recevoir son canal USB direct.
@@ -188,7 +342,7 @@ analogique, jamais les retours USB directs.
   le général et le casque restent indépendants. Les deux groupes de solos
   peuvent être utilisés simultanément.
 - Le bouton **MUTE ALL**, commun aux vues Console et Matrice, coupe les
-  14 entrées analogiques sur le général, le casque et les jacks. Il est
+  13 entrées audio sur le général, le casque et les jacks. Il est
   coché dans le menu **ES-9** lorsqu’il est actif, avec un avertissement rouge
   dans la fenêtre. Un second clic rétablit l’écoute selon les
   mutes et solos individuels, sans les avoir modifiés. Les retours USB directs
@@ -245,7 +399,9 @@ Les changements de routage et l'activation peuvent encore être audibles :
 réduire le volume pour ces opérations. L'absence totale de clics reste à
 confirmer à l'écoute sur le matériel.
 
-Les 14 entrées sont toujours envoyées aux canaux d'enregistrement USB 1 à 14.
+Les 14 entrées restent envoyées aux canaux d'enregistrement USB 1 à 14.
+L'entrée 14 reste donc disponible en réception directe pour le CLOCK, mais n'est
+jamais mélangée vers le général, le casque ou les sorties jack.
 Les canaux d'enregistrement USB 15 et 16 ne transportent plus le S/PDIF.
 La sortie casque reçoit le mix décrit ci-dessus si son écoute est activée,
 en plus du retour USB direct 3–4 qui reste indépendant. Les sorties ES-5 ne sont pas
@@ -268,7 +424,8 @@ signaux de VCV sur les prises **To device** du module :
 | 1–2 | Sorties principales gauche / droite |
 | 3–4 | Casque gauche / droite |
 | 5–8 | Inutilisés (S/PDIF désactivé, ES-5 non alimenté) |
-| 9–16 | Jacks 1–8, respectivement |
+| 9–15 | Jacks 1–7, respectivement |
+| 16 | OUT 8 : réservé au GATE Pamela, ne rien envoyer depuis VCV |
 
 Cette numérotation conserve les canaux des jacks de la configuration usine.
 Le casque reçoit directement les canaux 3–4, sans la somme 1–2 + 3–4 de la
@@ -285,7 +442,8 @@ avec un risque de saturation. Éviter également une boucle entrée ES-9 → VCV
 sortie ES-9 → même entrée.
 
 Les prises **From device** continuent de recevoir les entrées analogiques
-1 à 14. Ce retour direct ne consomme aucun emplacement des deux mélangeurs.
+1 à 14. L'entrée 14 est réservée au CLOCK et reste exclue des mélangeurs de la
+console. Ce retour direct ne consomme aucun emplacement des deux mélangeurs.
 L'activation et **Vérifier** contrôlent le routage USB par relecture.
 Après mise à jour, fermer et rouvrir l'application compilée, puis suspendre
 et réactiver la console pour appliquer ce routage. Une relecture conforme
@@ -304,7 +462,7 @@ pour les faders/pans et des CC ou notes momentanés pour les boutons (valeur
 non nulle à l'appui, zéro au relâchement). Les templates avec boutons à bascule
 ne sont pas pris en charge. Chaque message doit avoir une affectation unique.
 
-Banque 1 : entrées 1-8 ; banque 2 : entrées 9-14, contrôles 7-8 inactifs ;
+Banque 1 : entrées 1-8 ; banque 2 : entrées 9-13, contrôles 6-8 inactifs ;
 banque 3 : sorties jack 1-8, panoramiques inactifs car sorties mono.
 Les boutons de banque passent à la banque précédente ou suivante sans boucler.
 Apprendre également les huit boutons **Solo** si souhaité. Les affectations
@@ -330,7 +488,8 @@ Le retour LED Mute/Solo utilise la sortie MIDI du Launch Control sélectionnée
 dans la configuration MIDI. Dans Novation Components, régler le canal LED de
 chaque bouton sur le même canal que son canal MIDI d'envoi. Les LED suivent la
 banque affichée ; Mute est rouge et Solo vert. Le routage depuis les
-potentiomètres n'est pas disponible.
+potentiomètres n'est pas disponible. Le mapping MIDI propose aussi **Mute
+général** pour basculer MUTE ALL ; sa LED suit l'état de la coupure globale.
 Le Mac et l'application doivent rester ouverts pour ce pilotage physique.
 
 ### Sauvegardes
@@ -380,24 +539,31 @@ le trajet audio et les quatorze canaux d'enregistrement sont préservés.
 ```sh
 swift run MixerCoreTests
 bash scripts/test-midi.sh
+bash scripts/test-ui.sh
 ```
 
 Le runner de tests ne nécessite pas XCTest ni une installation complète de Xcode.
 Le test CoreMIDI utilise uniquement deux ports virtuels temporaires et vérifie
 un dump SysEx de 2166 octets ainsi que deux messages CC ; aucun matériel n'est modifié.
+Le test d'interface ouvre une fenêtre temporaire et envoie des clics souris aux
+boutons **GO**, **NEXT** et **ARRÊT** à deux tailles de fenêtre (1000 × 590 et
+1400 × 1050). Il vérifie le rappel des niveaux, le passage à la sous-scène
+suivante et l'arrêt pendant une transition. Sa session est isolée dans un
+dossier temporaire, sans lecture audio ni modification de la session utilisateur.
+Il nécessite une session graphique macOS, mais aucune autorisation d'accessibilité.
 Les tests couvrent l'allocation des destinations, les gains, les octets SysEx,
 le décodage des sauvegardes, le parsing MIDI et le rattrapage. Ils vérifient aussi
 la linéarité du gain entre 40 % et 100 %, la courbe inverse sur les 128 valeurs
 CC et l'activation du lissage sur les 16 sorties internes.
 Ils vérifient également
-les huit faders de sortie, les gains combinés entrée/sortie, les solos cumulatifs
+les sept faders de sortie audio, les gains combinés entrée/sortie, les solos cumulatifs
 et la priorité du mute sur les deux mélangeurs, l'indépendance général/casque,
 la banque MIDI des sorties et la migration des anciennes sessions sans
 changement de niveau.
 Les tests Strip vérifient l'encodage et l'adressage des filtres d'EQ, leur
 suivi lors d'une redistribution des entrées, le gain du trim et la migration des
 anciennes sessions (trim 0 dB, EQ désactivé).
-Les tests de matrice vérifient les 112 liaisons simultanées, les gains indépendants,
+Les tests de matrice vérifient les 91 liaisons audio simultanées, les gains indépendants,
 les mutes et solos, les limites matérielles, la redistribution sécurisée, les
 entrées sans destination et la migration des anciennes destinations exclusives.
 Le protocole cible le format de configuration 3 du firmware ES-9 1.3 ; les

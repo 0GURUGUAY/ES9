@@ -108,6 +108,173 @@ final class MixerCoreTests {
         XCTAssertEqual(try RoutingPlan(migrated), audible)
     }
 
+    func testLiveSceneValidationAndPersistence() throws {
+        var session = Session()
+        let inputCues = (0..<14).map { LiveInputCue(enabled: $0 < 3, level: Double($0) / 14, transitionSeconds: Double($0)) }
+        let first = LiveSubscene(name: "Intro", durationSeconds: 90, inputs: inputCues)
+        let second = LiveSubscene(name: "Tension", durationSeconds: 45, inputs: inputCues)
+        session.liveScenes = [LiveScene(name: "Set", subscenes: [first, second])]
+        try session.validate()
+        XCTAssertEqual(session.liveScenes[0].totalDurationSeconds, 135)
+
+        let restored = try JSONDecoder().decode(Session.self, from: JSONEncoder().encode(session))
+        XCTAssertEqual(restored, session)
+        XCTAssertEqual(restored.liveScenes[0].subscenes[0].inputs, inputCues)
+        XCTAssertEqual(restored.liveScenes[0].subscenes[0].durationSeconds, 90)
+
+        guard var legacySubscene = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(first)) as? [String: Any] else {
+            throw MixerError.invalidSession
+        }
+        legacySubscene.removeValue(forKey: "durationSeconds")
+        let restoredLegacySubscene = try JSONDecoder().decode(
+            LiveSubscene.self, from: JSONSerialization.data(withJSONObject: legacySubscene))
+        XCTAssertEqual(restoredLegacySubscene.durationSeconds, 0)
+
+        guard var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(Session())) as? [String: Any] else {
+            throw MixerError.invalidSession
+        }
+        legacy.removeValue(forKey: "liveScenes")
+        let migrated = try JSONDecoder().decode(Session.self, from: JSONSerialization.data(withJSONObject: legacy))
+        XCTAssertTrue(migrated.liveScenes.isEmpty)
+
+        for duration in [0.0, 30.0] {
+            var boundary = session
+            boundary.liveScenes[0].subscenes[0].inputs[0].transitionSeconds = duration
+            try boundary.validate()
+            XCTAssertEqual(try JSONDecoder().decode(Session.self, from: JSONEncoder().encode(boundary)), boundary)
+        }
+        for duration in [30.1, 600.0] {
+            var oldSession = session
+            oldSession.liveScenes[0].subscenes[0].inputs[0].transitionSeconds = duration
+            let migrated = try JSONDecoder().decode(Session.self, from: JSONEncoder().encode(oldSession))
+            XCTAssertEqual(migrated.liveScenes[0].subscenes[0].inputs[0].transitionSeconds, 30)
+            try migrated.validate()
+        }
+        for invalidDuration in [-0.1, 30.1, 600.1, .nan, .infinity] {
+            var invalid = session
+            invalid.liveScenes[0].subscenes[0].inputs[0].transitionSeconds = invalidDuration
+            XCTAssertThrowsError(try invalid.validate())
+        }
+        for invalidLevel in [-0.1, 1.1, .nan] {
+            var invalid = session
+            invalid.liveScenes[0].subscenes[0].inputs[0].level = invalidLevel
+            XCTAssertThrowsError(try invalid.validate())
+        }
+        var invalid = session
+        invalid.liveScenes[0].subscenes[0].inputs.removeLast()
+        XCTAssertThrowsError(try invalid.validate())
+        invalid = session
+        invalid.liveScenes[0].subscenes[0].name = "  "
+        XCTAssertThrowsError(try invalid.validate())
+        invalid = session
+        invalid.liveScenes[0].subscenes[0].durationSeconds = -1
+        XCTAssertThrowsError(try invalid.validate())
+        invalid = session
+        invalid.liveScenes[0].subscenes.append(first)
+        XCTAssertThrowsError(try invalid.validate())
+    }
+
+    func testLiveRoutingRecallAndMigration() throws {
+        var session = Session()
+        session.channels[0].jackSends[4] = JackSend(enabled: true, level: 0.6)
+        let original = session
+        var cues = session.channels.map {
+            LiveInputCue(enabled: !$0.muted, level: $0.level,
+                         jackSends: Array($0.jackSends.prefix(4)))
+        }
+        cues[0].jackSends = [JackSend(enabled: true, level: 0.8),
+                            JackSend(enabled: false, level: 0.2), JackSend(), JackSend()]
+        let cue = LiveSubscene(name: "Intro", inputs: cues)
+        let recalled = try session.applyingLiveRouting(cue)
+        XCTAssertTrue(recalled.routingLocked)
+        XCTAssertEqual(Array(recalled.channels[0].jackSends.prefix(4)), cues[0].jackSends)
+        XCTAssertEqual(Array(recalled.channels[0].jackSends.suffix(4)),
+                       Array(original.channels[0].jackSends.suffix(4)))
+        XCTAssertEqual(recalled.channels[0].level, original.channels[0].level)
+        XCTAssertEqual(recalled.channels[0].mainEnabled, original.channels[0].mainEnabled)
+        session.liveScenes = [LiveScene(name: "Set", subscenes: [cue])]
+        XCTAssertEqual(try JSONDecoder().decode(Session.self, from: JSONEncoder().encode(session)), session)
+
+        let legacy = Data("{\"enabled\":true,\"level\":0.7,\"transitionSeconds\":3}".utf8)
+        let legacyCue = try JSONDecoder().decode(LiveInputCue.self, from: legacy)
+        XCTAssertEqual(legacyCue.jackSends, nil)
+        XCTAssertEqual(try original.applyingLiveRouting(
+            LiveSubscene(name: "Ancienne", inputs: Array(repeating: legacyCue, count: 14))), original)
+        for sends in [[], [JackSend()], Array(repeating: JackSend(), count: 5),
+                      [JackSend(level: .nan), JackSend(), JackSend(), JackSend()],
+                      [JackSend(level: 1.1), JackSend(), JackSend(), JackSend()]] {
+            var invalid = session
+            invalid.liveScenes[0].subscenes[0].inputs[0].jackSends = sends
+            XCTAssertThrowsError(try invalid.validate())
+            XCTAssertThrowsError(try original.applyingLiveRouting(invalid.liveScenes[0].subscenes[0]))
+        }
+        var overloaded = original
+        for input in overloaded.channels.indices {
+            overloaded.channels[input].mainEnabled = false
+            overloaded.channels[input].jackSends = Array(repeating: JackSend(enabled: true), count: 8)
+        }
+        _ = try RoutingPlan(overloaded)
+        // Preserving outputs 5–8 while adding four sends and the stereo main exceeds capacity.
+        for input in overloaded.channels.indices { overloaded.channels[input].mainEnabled = true }
+        let allSends = LiveSubscene(name: "Trop de sorties", inputs: Array(
+            repeating: LiveInputCue(jackSends: Array(repeating: JackSend(enabled: true), count: 4)), count: 14))
+        XCTAssertThrowsError(try overloaded.applyingLiveRouting(allSends))
+    }
+
+    func testLiveInputFadeInAndFadeOut() {
+        let fadeIn = LiveInputCue(enabled: true, level: 0.8, transitionSeconds: 4)
+        XCTAssertEqual(fadeIn.transitionStartLevel(currentLevel: 0.6, currentlyMuted: true), 0)
+        XCTAssertEqual(fadeIn.transitionStartLevel(currentLevel: 0.6, currentlyMuted: false), 0)
+        XCTAssertEqual(Channel.gain(fadeIn.transitionLevel(from: 0, after: 2)), Channel.gain(0.8) * pow(0.5, 1.6), accuracy: 0.000001)
+        XCTAssertEqual(fadeIn.transitionLevel(from: 0, after: 4), 0.8, accuracy: 0.000001)
+
+        let fadeOut = LiveInputCue(enabled: false, level: 0.65, transitionSeconds: 2)
+        XCTAssertEqual(fadeOut.transitionStartLevel(currentLevel: 0.8, currentlyMuted: false), 0.8)
+        XCTAssertEqual(fadeOut.transitionStartLevel(currentLevel: 0.8, currentlyMuted: true), 0)
+        XCTAssertEqual(Channel.gain(fadeOut.transitionLevel(from: 0.8, after: 1)), Channel.gain(0.8) * pow(0.5, 1.6), accuracy: 0.000001)
+        XCTAssertEqual(fadeOut.transitionLevel(from: 0.8, after: 2), 0, accuracy: 0.000001)
+        XCTAssertEqual(fadeOut.transitionLevel(from: 0.8, after: 3), 0, accuracy: 0.000001)
+        XCTAssertEqual(LiveInputCue(enabled: true, level: 0.3, transitionSeconds: 0)
+            .transitionLevel(from: 0, after: 0), 0.3, accuracy: 0.000001)
+        let immediate = LiveInputCue(enabled: true, level: 0.3, transitionSeconds: 0)
+        XCTAssertEqual(immediate.transitionStartLevel(currentLevel: 0.9, currentlyMuted: false), 0.3)
+        XCTAssertEqual(immediate.transitionStartLevel(currentLevel: 0.9, currentlyMuted: true), 0.3)
+
+        let bitbox = LiveInputCue(level: (60 - 9.2) / 60, transitionSeconds: 6)
+        let start = bitbox.transitionStartLevel(currentLevel: bitbox.level, currentlyMuted: false)
+        XCTAssertEqual(start, 0)
+        XCTAssertEqual(Channel.gain(start), 0)
+        XCTAssertEqual(bitbox.transitionLevel(from: start, after: 0), 0)
+        XCTAssertEqual(Channel.gain(bitbox.transitionLevel(from: start, after: 3)), Channel.gain(bitbox.level) * pow(0.5, 1.6),
+                       accuracy: 0.000001)
+        XCTAssertTrue(bitbox.transitionLevel(from: start, after: 0.3) > 0.1)
+        XCTAssertEqual(bitbox.transitionLevel(from: start, after: 6), bitbox.level, accuracy: 0.000001)
+        XCTAssertEqual(Channel.decibels(bitbox.transitionLevel(from: start, after: 6)), "-9.2 dB")
+        XCTAssertEqual(bitbox.transitionStartLevel(currentLevel: 1, currentlyMuted: false), 0)
+    }
+
+    func testLiveSequenceAdvancesAndHoldsAtEnd() {
+        let cues = Array(repeating: LiveInputCue(), count: 14)
+        let first = LiveSubscene(name: "Intro", inputs: cues)
+        let second = LiveSubscene(name: "Tension", inputs: cues)
+        let third = LiveSubscene(name: "Drop", inputs: cues)
+        let sceneA = LiveScene(name: "A", subscenes: [first, second])
+        let sceneB = LiveScene(name: "B", subscenes: [third])
+        let scenes = [sceneA, sceneB]
+
+        XCTAssertEqual(LiveSequence.next(in: [], after: nil, subsceneID: nil), .empty)
+        XCTAssertEqual(LiveSequence.next(in: scenes, after: nil, subsceneID: nil),
+                       .cue(sceneID: sceneA.id, subsceneID: first.id))
+        XCTAssertEqual(LiveSequence.next(in: scenes, after: sceneA.id, subsceneID: first.id),
+                       .cue(sceneID: sceneA.id, subsceneID: second.id))
+        XCTAssertEqual(LiveSequence.next(in: scenes, after: sceneA.id, subsceneID: second.id),
+                       .cue(sceneID: sceneB.id, subsceneID: third.id))
+        XCTAssertEqual(LiveSequence.next(in: scenes, after: sceneB.id, subsceneID: third.id), .finished)
+        XCTAssertEqual(LiveSequence.next(in: scenes, after: UUID(), subsceneID: UUID()),
+                       .cue(sceneID: sceneA.id, subsceneID: first.id))
+    }
+
     func testDSPUsageProtocol() throws {
         func response(_ counters: [Int]) -> [UInt8] {
             ES9.message(0x12, counters.flatMap { [UInt8($0 >> 7), UInt8($0 & 0x7F)] })
@@ -178,8 +345,12 @@ final class MixerCoreTests {
         let plan = try RoutingPlan(session)
         XCTAssertEqual(plan.outputs[0], [6, 7, 31, 31, 31, 31, 31, 31])
         XCTAssertEqual(plan.outputs[1], plan.outputs[0])
-        for row in [0, 1, 8, 9] {
+        for row in [0, 1] {
             XCTAssertEqual(Array(plan.coefficients[row].prefix(7)), Array(repeating: 5793, count: 7))
+            XCTAssertEqual(plan.coefficients[row][7], 0)
+        }
+        for row in [8, 9] {
+            XCTAssertEqual(Array(plan.coefficients[row].prefix(7)), Array(repeating: 5793, count: 6) + [0])
             XCTAssertEqual(plan.coefficients[row][7], 0)
         }
         XCTAssertEqual(Channel.gain(0), 0)
@@ -196,8 +367,8 @@ final class MixerCoreTests {
 
     func testEveryPossibleDestinationSubsetFits() throws {
         // All 9^7 ordered assignments reduce to these 9-choose-at-most-7 subsets.
-        for mask in 1..<512 {
-            let destinations = (0...8).filter { mask & (1 << $0) != 0 }
+        for mask in 1..<256 {
+            let destinations = (0...7).filter { mask & (1 << $0) != 0 }
             guard destinations.count <= 7 else { continue }
             var session = Session()
             for index in 0..<14 {
@@ -211,7 +382,7 @@ final class MixerCoreTests {
 
     func testJackMappingAndExclusiveDestinations() throws {
         XCTAssertEqual(ES9.jackOutputs, [8, 9, 4, 5, 2, 3, 11, 10])
-        for destination in 1...8 {
+        for destination in 1...7 {
             var session = Session()
             session.channels[0].routeExclusively(to: destination)
             session.channels[0].level = 1
@@ -299,8 +470,8 @@ final class MixerCoreTests {
     }
 
     func testHeadphoneAllocationAndRerouting() throws {
-        for mask in 1..<512 {
-            let destinations = (0...8).filter { mask & (1 << $0) != 0 }
+        for mask in 1..<256 {
+            let destinations = (0...7).filter { mask & (1 << $0) != 0 }
             var session = Session()
             session.headphonesEnabled = true
             for index in 0..<14 {
@@ -321,6 +492,12 @@ final class MixerCoreTests {
                 XCTAssertEqual(plan.outputs[block].count, 8)
                 for column in 0..<8 where plan.inputs[block][column] != ES9.silentSource {
                     let index = ES9.analogInputs.firstIndex(of: plan.inputs[block][column])!
+                    if index == ES9.clockInputIndex {
+                        for row in (block * 8)..<(block * 8 + 8) {
+                            XCTAssertEqual(plan.coefficients[row][column], 0)
+                        }
+                        continue
+                    }
                     let destination = session.channels[index].destinations[0]
                     let target: UInt8 = destination == 0 ? 6 : ES9.jackOutputs[destination - 1]
                     let row = plan.outputs[block].firstIndex(of: target)!
@@ -381,7 +558,7 @@ final class MixerCoreTests {
     func testReroutingSilencesBeforeChangingOutput() throws {
         var session = Session()
         let old = try RoutingPlan(session)
-        session.channels[0].routeExclusively(to: 8)
+        session.channels[0].routeExclusively(to: 7)
         let packets = try RoutingPlan(session).messages(from: old)
         XCTAssertEqual(packets.count, 129)
         XCTAssertEqual(packets[64][5], 0x52)
@@ -552,10 +729,10 @@ final class MixerCoreTests {
         session.headphonesLevel = 60.0 / 72.0
         for index in 0..<14 {
             session.channels[index].level = 1
-            session.channels[index].routeExclusively(to: index < 12 ? index % 8 + 1 : 0)
+            session.channels[index].routeExclusively(to: index < 12 ? index % 7 + 1 : 0)
         }
         let original = try RoutingPlan(session)
-        for output in 0..<8 {
+        for output in 0..<7 {
             var changed = session
             changed.outputs[output].level = 0.5
             let attenuated = try RoutingPlan(changed)
@@ -574,26 +751,27 @@ final class MixerCoreTests {
             XCTAssertEqual(try RoutingPlan(changed), muted)
         }
         session.outputs[0].soloed = true
-        session.outputs[7].soloed = true
+        session.outputs[6].soloed = true
         let solo = try RoutingPlan(session)
         XCTAssertEqual(solo.inputs, original.inputs)
         XCTAssertEqual(solo.outputs, original.outputs)
         for input in 0..<12 {
             let destination = session.channels[input].destinations[0]
             XCTAssertEqual(coefficient(solo, input: input, output: ES9.jackOutputs[destination - 1]),
-                           destination == 1 || destination == 8 ? 8192 : 0)
+                           destination == 1 || destination == 7 ? 8192 : 0)
         }
-        for input in 12..<14 {
+        for input in 12..<13 {
             for output in [UInt8(6), 7, 12, 13] {
                 XCTAssertEqual(coefficient(solo, input: input, output: output), 5793)
             }
         }
+        XCTAssertEqual(coefficient(solo, input: ES9.clockInputIndex, output: 6), 0)
         session.outputs[0].muted = true
         let mutedSolo = try RoutingPlan(session)
         XCTAssertEqual(coefficient(mutedSolo, input: 0, output: 8), 0)
-        XCTAssertEqual(coefficient(mutedSolo, input: 7, output: 10), 8192)
+        XCTAssertEqual(coefficient(mutedSolo, input: 6, output: 11), 8192)
         XCTAssertTrue(mutedSolo.messages(from: solo).allSatisfy { (0x60...0x6F).contains($0[5]) })
-        session.outputs[7].soloed = false
+        session.outputs[6].soloed = false
         XCTAssertFalse(session.outputIsAudible(7))
     }
 
@@ -603,7 +781,7 @@ final class MixerCoreTests {
         session.headphonesLevel = 60.0 / 72.0
         session.master = 1
         for index in 0..<14 { session.channels[index].level = 1 }
-        session.channels[13].routeExclusively(to: 8)
+        session.channels[13].routeExclusively(to: 7)
         let original = try RoutingPlan(session)
         session.channels[0].soloed = true
         session.channels[13].soloed = true
@@ -615,7 +793,7 @@ final class MixerCoreTests {
                 XCTAssertEqual(coefficient(solo, input: input, output: output), input == 0 ? 5793 : 0)
             }
         }
-        XCTAssertEqual(coefficient(solo, input: 13, output: 10), 8192)
+        XCTAssertEqual(coefficient(solo, input: ES9.clockInputIndex, output: 11), 0)
         session.channels[0].muted = true
         session.channels[13].muted = true
         XCTAssertTrue(try RoutingPlan(session).coefficients.flatMap { $0 }.allSatisfy { $0 == 0 })
@@ -624,6 +802,20 @@ final class MixerCoreTests {
         XCTAssertTrue(session.inputIsAudible(1))
         XCTAssertFalse(session.inputIsAudible(0))
         XCTAssertTrue(solo.messages(from: original).allSatisfy { (0x60...0x6F).contains($0[5]) })
+    }
+
+    func testClockInputIsExcludedFromAudioMix() throws {
+        var session = Session()
+        let baseline = try RoutingPlan(session)
+        session.channels[ES9.clockInputIndex].mainEnabled = true
+        session.channels[ES9.clockInputIndex].jackSends[0] = JackSend(enabled: true)
+        session.channels[ES9.clockInputIndex].soloed = true
+        session.channels[ES9.clockInputIndex].eq.enabled = true
+
+        XCTAssertTrue(session.channels[ES9.clockInputIndex].destinations.isEmpty)
+        XCTAssertFalse(session.inputIsAudible(ES9.clockInputIndex))
+        XCTAssertTrue(session.inputIsAudible(0))
+        XCTAssertEqual(try RoutingPlan(session), baseline)
     }
 
     func testCombinedInputAndOutputGain() throws {
@@ -641,6 +833,13 @@ final class MixerCoreTests {
         XCTAssertEqual(coefficient(plan, input: 7, output: 8), 1031)
         session.master = 0
         XCTAssertEqual(try RoutingPlan(session), plan)
+        session.outputs[7].soloed = true
+        session.outputs[7].muted = true
+        XCTAssertEqual(try RoutingPlan(session), plan)
+        XCTAssertFalse(session.outputIsAudible(7))
+        XCTAssertTrue(session.channels.allSatisfy { !$0.destinations.contains(8) })
+        XCTAssertFalse(plan.outputs.flatMap { $0 }.contains(ES9.jackOutputs[7]))
+        XCTAssertEqual(try JSONDecoder().decode(Session.self, from: JSONEncoder().encode(session)), session)
     }
 
     func testMixerSessionMigrationAndOutputValidation() throws {
@@ -678,9 +877,11 @@ final class MixerCoreTests {
 
     func testControllerOutputBankAndNewMappings() throws {
         XCTAssertEqual(ControllerBank.inputs1.target(7), .input(7))
-        XCTAssertEqual(ControllerBank.inputs2.target(5), .input(13))
+        XCTAssertEqual(ControllerBank.inputs2.target(4), .input(12))
+        XCTAssertEqual(ControllerBank.inputs2.target(5), nil)
         XCTAssertEqual(ControllerBank.inputs2.target(6), nil)
-        XCTAssertEqual(ControllerBank.outputs.target(7), .output(7))
+        XCTAssertEqual(ControllerBank.outputs.target(6), .output(6))
+        XCTAssertEqual(ControllerBank.outputs.target(7), nil)
         XCTAssertEqual(ControllerBank.outputs.target(8), nil)
         XCTAssertEqual(ControllerBank.inputs1.target(-1), nil)
         XCTAssertEqual(ControllerBank.allCases.count, 3)
@@ -689,6 +890,15 @@ final class MixerCoreTests {
             XCTAssertFalse(ControlMapping(action: action, status: 0x90, number: 1).isValid)
             XCTAssertTrue(ControlMapping.isContinuous(action))
         }
+        XCTAssertTrue(ControlMapping.actions.contains("muteAll"))
+        XCTAssertEqual(ControlMapping.label("muteAll"), "Mute général")
+        XCTAssertTrue(ControlMapping(action: "muteAll", status: 0x90, number: 1).isValid)
+        XCTAssertFalse(ControlMapping.isContinuous("muteAll"))
+        XCTAssertTrue(ControlMapping.actions.contains("sceneNext"))
+        XCTAssertEqual(ControlMapping.label("sceneNext"), "Sous-scène suivante")
+        XCTAssertTrue(ControlMapping(action: "sceneNext", status: 0x90, number: 1).isValid)
+        XCTAssertTrue(ControlMapping(action: "sceneNext", status: 0xB0, number: 1).isValid)
+        XCTAssertFalse(ControlMapping.isContinuous("sceneNext"))
         for slot in 0..<8 {
             XCTAssertTrue(ControlMapping(action: "solo\(slot)", status: 0x90, number: 1).isValid)
             XCTAssertTrue(ControlMapping(action: "solo\(slot)", status: 0xB0, number: 1).isValid)
@@ -698,12 +908,13 @@ final class MixerCoreTests {
         session.mappings = [
             ControlMapping(action: "solo0", status: 0x90, number: 1),
             ControlMapping(action: "master", status: 0xB0, number: 1),
-            ControlMapping(action: "headphones", status: 0xB0, number: 2)
+            ControlMapping(action: "headphones", status: 0xB0, number: 2),
+            ControlMapping(action: "muteAll", status: 0x90, number: 3)
         ]
         try session.validate()
     }
 
-    func testFullMatrixAll112Connections() throws {
+    func testFullMatrixAll91Connections() throws {
         var session = Session()
         for input in 0..<14 {
             session.channels[input].mainEnabled = false
@@ -711,12 +922,13 @@ final class MixerCoreTests {
             session.channels[input].jackSends = Array(repeating: JackSend(enabled: true), count: 8)
         }
         let plan = try RoutingPlan(session)
-        XCTAssertEqual(plan.outputs, [ES9.jackOutputs, ES9.jackOutputs])
+        let audioOutputs = Array(ES9.jackOutputs.prefix(7)) + [ES9.unusedOutput]
+        XCTAssertEqual(plan.outputs, [audioOutputs, audioOutputs])
         XCTAssertEqual(plan.inputs.flatMap { $0 }.filter { $0 != ES9.silentSource }.sorted(),
                        ES9.analogInputs.sorted())
-        XCTAssertEqual(plan.coefficients.flatMap { $0 }.filter { $0 == 8192 }.count, 112)
-        for input in 0..<14 {
-            for output in ES9.jackOutputs {
+        XCTAssertEqual(plan.coefficients.flatMap { $0 }.filter { $0 == 8192 }.count, 91)
+        for input in 0..<ES9.mixerInputCount {
+            for output in ES9.jackOutputs.prefix(7) {
                 XCTAssertEqual(coefficient(plan, input: input, output: output), 8192)
             }
         }
@@ -734,25 +946,25 @@ final class MixerCoreTests {
         session.channels[0].level = 0.9
         session.channels[0].pan = -1
         session.channels[0].jackSends[0] = JackSend(enabled: true, level: 0.8)
-        session.channels[0].jackSends[7] = JackSend(enabled: true)
+        session.channels[0].jackSends[6] = JackSend(enabled: true)
         session.outputs[0].level = 0.9
         session.channels[7].level = 1
         session.channels[7].jackSends[0] = JackSend(enabled: true)
         let plan = try RoutingPlan(session)
         XCTAssertEqual(coefficient(plan, input: 0, output: 8), 517)
-        XCTAssertEqual(coefficient(plan, input: 0, output: 10), 4106)
+        XCTAssertEqual(coefficient(plan, input: 0, output: 11), 4106)
         XCTAssertEqual(coefficient(plan, input: 0, output: 6), 4106)
         XCTAssertEqual(coefficient(plan, input: 0, output: 12), 4106)
         XCTAssertEqual(coefficient(plan, input: 0, output: 7), 0)
         XCTAssertEqual(coefficient(plan, input: 7, output: 8), 4106)
-        session.outputs[7].soloed = true
+        session.outputs[6].soloed = true
         var changed = try RoutingPlan(session)
         XCTAssertEqual(coefficient(changed, input: 0, output: 8), 0)
-        XCTAssertEqual(coefficient(changed, input: 0, output: 10), 4106)
+        XCTAssertEqual(coefficient(changed, input: 0, output: 11), 4106)
         XCTAssertEqual(coefficient(changed, input: 0, output: 12), 4106)
-        session.outputs[7].muted = true
+        session.outputs[6].muted = true
         changed = try RoutingPlan(session)
-        XCTAssertEqual(coefficient(changed, input: 0, output: 10), 0)
+        XCTAssertEqual(coefficient(changed, input: 0, output: 11), 0)
         session.channels[0].soloed = true
         changed = try RoutingPlan(session)
         XCTAssertEqual(coefficient(changed, input: 7, output: 6), 0)
@@ -795,7 +1007,7 @@ final class MixerCoreTests {
         }
         let fits = try RoutingPlan(session)
         XCTAssertEqual(fits.outputs[0].filter { $0 != ES9.unusedOutput }.count, 8)
-        XCTAssertEqual(fits.outputs[1], ES9.jackOutputs)
+        XCTAssertEqual(fits.outputs[1], Array(ES9.jackOutputs.prefix(7)) + [ES9.unusedOutput])
         session.channels[6].jackSends = Array(repeating: JackSend(enabled: true), count: 8)
         session.channels[6].mainEnabled = false
         session.channels[7].jackSends = (0..<8).map { JackSend(enabled: $0 < 4) }
@@ -976,6 +1188,105 @@ final class MixerCoreTests {
         let firstLevel = messages.dropFirst(128).firstIndex { (0x60...0x6F).contains($0[5]) } ?? 0
         XCTAssertTrue(firstFilter >= 128)
         XCTAssertTrue(firstFilter < firstLevel)
+    }
+
+    func testInputDisplayOrderPreservesAudioAndIdentity() throws {
+        var session = Session()
+        session.channels[4].name = "Synth"
+        session.channels[4].level = 0.65
+        session.channels[4].trim = -3
+        session.channels[4].eq.enabled = true
+        session.channels[4].jackSends[0] = JackSend(enabled: true, level: 0.7)
+        session.channels[1].soloed = true
+        let original = session
+        let plan = try RoutingPlan(session)
+
+        try session.moveConsoleInput(from: 4, to: 0)
+        XCTAssertEqual(session.consoleInputOrder, [4, 0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+        try session.moveConsoleInput(from: 2, to: 1)
+        XCTAssertEqual(session.consoleInputOrder, [4, 1, 0, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+        XCTAssertEqual(session.stripInputs, original.stripInputs)
+        try session.moveConsoleInput(from: 0, to: 13)
+        XCTAssertEqual(session.consoleInputOrder, [1, 0, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 4])
+        try session.moveConsoleInput(from: 13, to: 0)
+        let reordered = session
+        try session.moveConsoleInput(from: 0, to: 0)
+        XCTAssertEqual(session, reordered)
+
+        session.stripInputs = [4, 1, 9, 12]
+        try session.moveStripInput(from: 0, to: 3)
+        XCTAssertEqual(session.stripInputs, [1, 9, 12, 4])
+        try session.moveStripInput(from: 3, to: 0)
+        XCTAssertEqual(session.stripInputs, [4, 1, 9, 12])
+        XCTAssertEqual(session.consoleInputOrder, reordered.consoleInputOrder)
+        XCTAssertEqual(session.channels, original.channels)
+        XCTAssertEqual(session.outputs, original.outputs)
+        XCTAssertEqual(session.mappings, original.mappings)
+        XCTAssertEqual(try RoutingPlan(session), plan)
+        XCTAssertTrue(try RoutingPlan(session).messages(from: plan).isEmpty)
+        for bank in ControllerBank.allCases {
+            for slot in 0..<8 {
+                // Physical controller targets do not depend on display positions.
+                if case .input(let input) = bank.target(slot) {
+                    XCTAssertEqual(session.channels[input].id, original.channels[input].id)
+                }
+            }
+        }
+    }
+
+    func testInputDisplayOrderPersistenceAndMigration() throws {
+        var session = Session()
+        try session.moveConsoleInput(from: 4, to: 0)
+        session.stripInputs = [4, 1, 12, 0]
+        let encoded = try JSONEncoder().encode(session)
+        let restored = try JSONDecoder().decode(Session.self, from: encoded)
+        try restored.validate()
+        XCTAssertEqual(restored, session)
+        guard var legacy = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
+            throw MixerError.invalidSession
+        }
+        legacy.removeValue(forKey: "consoleInputOrder")
+        legacy.removeValue(forKey: "stripInputs")
+        let migrated = try JSONDecoder().decode(Session.self, from: JSONSerialization.data(withJSONObject: legacy))
+        try migrated.validate()
+        XCTAssertEqual(migrated.consoleInputOrder, Array(0..<14))
+        XCTAssertEqual(migrated.stripInputs, [9, 10, 11, 12])
+        XCTAssertEqual(migrated.channels, session.channels)
+        XCTAssertEqual(try RoutingPlan(migrated), try RoutingPlan(session))
+
+        session.stripInputs = [4, 1, ES9.clockInputIndex, 0]
+        let withClockStrip = try JSONEncoder().encode(session)
+        let migratedClockStrip = try JSONDecoder().decode(Session.self, from: withClockStrip)
+        XCTAssertEqual(migratedClockStrip.stripInputs, [4, 1, 0, 0])
+    }
+
+    func testInputDisplayOrderValidation() throws {
+        let original = Session()
+        for order in [[], Array(0..<13), Array(0..<15), Array(repeating: 0, count: 14),
+                      [-1] + Array(1..<14), Array(0..<13) + [14]] {
+            var invalid = original
+            invalid.consoleInputOrder = order
+            XCTAssertThrowsError(try invalid.validate())
+        }
+        for inputs in [[], [0, 1, 2], [0, 1, 2, 3, 4], [-1, 1, 2, 3], [0, 1, 2, 14]] {
+            var invalid = original
+            invalid.stripInputs = inputs
+            XCTAssertThrowsError(try invalid.validate())
+        }
+        var session = original
+        for (source, destination) in [(-1, 0), (0, -1), (14, 0), (0, 14)] {
+            XCTAssertThrowsError(try session.moveConsoleInput(from: source, to: destination))
+            XCTAssertEqual(session, original)
+        }
+        for (source, destination) in [(-1, 0), (0, -1), (4, 0), (0, 4)] {
+            XCTAssertThrowsError(try session.moveStripInput(from: source, to: destination))
+            XCTAssertEqual(session, original)
+        }
+        // The strip selectors historically allow displaying the same input in multiple slots.
+        session.stripInputs = [4, 4, 1, 1]
+        try session.validate()
+        try session.moveStripInput(from: 0, to: 3)
+        XCTAssertEqual(session.stripInputs, [4, 1, 1, 4])
     }
 
     func testStripTrimGainAndMigration() throws {

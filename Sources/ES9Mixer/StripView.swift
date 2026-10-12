@@ -6,8 +6,10 @@ import MixerCore
 struct InputStripView: View {
     @EnvironmentObject var store: MixerStore
     let slot: Int
-    private var index: Int { store.stripInputs[slot] }
+    let dragContext: UUID
+    private var index: Int { store.session.stripInputs[slot] }
     private var channel: Channel { store.session.channels[index] }
+    private var isMuted: Bool { channel.muted || store.session.muteAll }
     private static let bandNames = ["LOW", "MID", "HIGH"]
 
     var body: some View {
@@ -43,44 +45,51 @@ struct InputStripView: View {
             }
             StripSection(title: "VOLUME") {
                 VStack(spacing: 6) {
+                    let sceneTarget = store.liveTargetLevel(for: index)
                     VerticalFader(value: Binding(
-                        get: { channel.level },
-                        set: { value in store.changeChannel(index) { $0.level = value } }
+                        get: { sceneTarget ?? channel.level },
+                        set: { value in
+                            store.changeChannel(index) { $0.level = value }
+                        }
                     ), tint: .cyan)
-                    Text(Channel.decibels(channel.level)).font(.system(.caption, design: .monospaced))
+                    Text(Channel.decibels(sceneTarget ?? channel.level))
+                        .font(.system(.caption, design: .monospaced))
                 }
             }
-            StripButtons(muted: channel.muted, soloed: channel.soloed,
+            StripButtons(muted: isMuted, soloed: channel.soloed,
                          mute: { store.changeChannel(index) { $0.muted.toggle() } },
                          solo: { store.changeChannel(index) { $0.soloed.toggle() } })
                 .controlSize(.regular)
             Text(store.session.inputIsAudible(index) ? " "
-                 : store.session.muteAll ? "MUTE ALL" : (channel.muted ? "Muet" : "Exclue par SOLO"))
-                .font(.caption2).foregroundStyle(.secondary)
+                 : store.session.muteAll ? "MUTE GÉNÉRAL" : (channel.muted ? "Muet" : "Exclue par SOLO"))
+                .font(.caption2.bold())
+                .foregroundStyle(store.session.muteAll || channel.muted ? .white : .secondary)
         }
         .padding(12)
         .frame(width: 236)
-        .background(channel.muted ? Color.red.opacity(0.5)
+        .background(isMuted ? Color.red.opacity(0.5)
                     : channel.soloed ? Color.yellow.opacity(0.4) : Color.white.opacity(0.045),
                     in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(
-            channel.muted ? Color.red : channel.soloed ? Color.yellow : Color.cyan.opacity(0.35),
-            lineWidth: channel.muted || channel.soloed ? 2 : 1
+            isMuted ? Color.red : channel.soloed ? Color.yellow : Color.cyan.opacity(0.35),
+            lineWidth: isMuted || channel.soloed ? 2 : 1
         ))
     }
 
     private var header: some View {
         VStack(spacing: 6) {
-            HStack {
-                Text(String(format: "%02d", index + 1)).font(.title.bold()).foregroundStyle(.cyan)
-                Spacer()
-                Picker("Entrée", selection: $store.stripInputs[slot]) {
-                    ForEach(0..<14) { Text("\($0 + 1) · \(store.session.channels[$0].name)").tag($0) }
+            InputStripDragHandle(context: dragContext, source: slot, input: index, isConsole: false)
+            Picker("Entrée", selection: Binding(
+                get: { store.session.stripInputs[slot] },
+                set: { store.setStripInput(slot, input: $0) }
+            )) {
+                ForEach(Array(0..<ES9.mixerInputCount), id: \.self) {
+                    Text("\($0 + 1) · \(store.session.channels[$0].name)").tag($0)
                 }
-                .labelsHidden()
-                .frame(width: 160)
-                .help("Choisir l’entrée affichée dans cette tranche.")
             }
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+            .help("Choisir l’entrée affichée dans cette tranche.")
             TextField("Nom", text: Binding(
                 get: { channel.name },
                 set: { value in store.changeChannel(index) { $0.name = value } }
@@ -133,32 +142,48 @@ struct InputStripView: View {
 
     private func sendKnob(_ output: Int) -> some View {
         let send = channel.jackSends[output]
+        return SendRoutingKnob(send: send, output: output, routingLocked: store.session.routingLocked,
+                               controlsEnabled: !store.liveSceneActive,
+                               setLevel: { value in store.changeChannel(index) { $0.jackSends[output].level = value } },
+                               toggle: { store.changeChannel(index) { $0.jackSends[output].enabled.toggle() } })
+    }
+
+    private static func frequency(_ hertz: Double) -> String {
+        hertz < 1000 ? String(format: "%.0f Hz", hertz) : String(format: "%.1f k", hertz / 1000)
+    }
+}
+
+struct SendRoutingKnob: View {
+    let send: JackSend
+    let output: Int
+    let routingLocked: Bool
+    var controlsEnabled = true
+    let setLevel: (Double) -> Void
+    let toggle: () -> Void
+
+    var body: some View {
         return VStack(spacing: 4) {
             RotaryKnob(value: Binding(
                 get: { send.level },
-                set: { value in store.changeChannel(index) { $0.jackSends[output].level = value } }
+                set: setLevel
             ), range: 0...1, defaultValue: 1, tint: .orange, size: 40, label: "OUT \(output + 1)",
                        text: { $0 == 0 ? "−∞" : String(format: "%.0f dB", -60 + $0 * 60) })
                 .opacity(send.enabled ? 1 : 0.4)
-            Button(send.enabled ? "ON" : "OFF") {
-                store.changeChannel(index) { $0.jackSends[output].enabled.toggle() }
-            }
+                .allowsHitTesting(controlsEnabled)
+            Button(send.enabled ? "ON" : "OFF", action: toggle)
             .buttonStyle(.borderedProminent)
             .tint(send.enabled ? .orange : .gray)
             .controlSize(.mini)
-            .disabled(store.session.routingLocked)
+            .disabled(routingLocked || !controlsEnabled)
             .accessibilityLabel("Envoi vers sortie \(output + 1)")
             .accessibilityValue(send.enabled ? "Activé" : "Désactivé")
-            .help(store.session.routingLocked
+            .help(routingLocked
                   ? "Décocher « Routage verrouillé » pour activer ou couper cet envoi."
                   : "Activer ou couper l’envoi vers la sortie jack \(output + 1).")
         }
         .frame(maxWidth: .infinity)
     }
 
-    private static func frequency(_ hertz: Double) -> String {
-        hertz < 1000 ? String(format: "%.0f Hz", hertz) : String(format: "%.1f k", hertz / 1000)
-    }
 }
 
 struct StripSection<Content: View, Trailing: View>: View {
@@ -304,12 +329,7 @@ struct StripOutputsView: View {
                 set: { value in store.changeOutput(index) { $0.level = value } }
             ), range: 0...1, defaultValue: 1, tint: .orange, size: 50, label: "NIVEAU", text: Channel.decibels)
             VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("OUT \(index + 1)").font(.headline).foregroundStyle(.orange)
-                    if store.bank == .outputs {
-                        Text("LC \(index + 1)").font(.caption2).foregroundStyle(.cyan)
-                    }
-                }
+                Text("OUT \(index + 1)").font(.headline).foregroundStyle(.orange)
                 TextField("Nom", text: Binding(
                     get: { output.name }, set: { value in store.changeOutput(index) { $0.name = value } }
                 )).textFieldStyle(.plain).font(.callout.bold())
@@ -327,13 +347,16 @@ struct StripOutputsView: View {
 
     private var masterCard: some View {
         let muted = store.session.masterMuted
-        return card(muted: muted, soloed: false, tint: .cyan) {
+        let isMuteAll = store.session.muteAll
+        return card(muted: muted || isMuteAll, soloed: false, tint: .cyan) {
             RotaryKnob(value: Binding(get: { store.session.master }, set: store.setMaster),
                        range: 0...1, defaultValue: 0.8, tint: .cyan, size: 50, label: "NIVEAU",
                        text: Channel.decibels)
             VStack(alignment: .leading, spacing: 4) {
                 Text("GÉNÉRAL").font(.headline).foregroundStyle(.cyan)
-                Text("Stéréo L / R").font(.caption).foregroundStyle(.secondary)
+                Text(isMuteAll ? "MUTE GÉNÉRAL" : "Stéréo L / R")
+                    .font(.caption.bold())
+                    .foregroundStyle(isMuteAll ? .red : .secondary)
                 Button("MUTE", action: store.toggleMasterMute)
                     .tint(muted ? .red : .gray)
                     .buttonStyle(.borderedProminent)

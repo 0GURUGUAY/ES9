@@ -7,7 +7,8 @@ let package = Package(
     products: [.executable(name: "ES9Mixer", targets: ["ES9Mixer"])],
     targets: [
         .target(name: "MixerCore"),
-        .executableTarget(name: "ES9Mixer", dependencies: ["MixerCore"]),
+        .target(name: "GateState"),
+        .executableTarget(name: "ES9Mixer", dependencies: ["MixerCore", "GateState"]),
         .executableTarget(name: "MixerCoreTests", dependencies: ["MixerCore"], path: "Tests/MixerCoreTests")
     ]
 )

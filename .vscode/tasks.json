@@ -4,7 +4,7 @@
 		{
 			"label": "Tester et compiler ES-9 Mixer",
 			"type": "shell",
-			"command": "swift run MixerCoreTests && bash scripts/test-midi.sh && bash scripts/build-app.sh",
+			"command": "swift run MixerCoreTests && bash scripts/test-midi.sh && bash scripts/test-ui.sh && bash scripts/build-app.sh",
 			"isBackground": false,
 			"problemMatcher": [],
 			"group": "build"

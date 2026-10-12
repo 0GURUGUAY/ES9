@@ -11,8 +11,8 @@ public enum ControllerBank: Int, CaseIterable {
     public var label: String {
         switch self {
         case .inputs1: return "Entrées 1–8"
-        case .inputs2: return "Entrées 9–14"
-        case .outputs: return "Sorties 1–8"
+        case .inputs2: return "Entrées 9–13"
+        case .outputs: return "Sorties 1–7 · OUT 8 GATE"
         }
     }
 
@@ -20,8 +20,8 @@ public enum ControllerBank: Int, CaseIterable {
         guard (0..<8).contains(slot) else { return nil }
         switch self {
         case .inputs1: return .input(slot)
-        case .inputs2: return slot < 6 ? .input(slot + 8) : nil
-        case .outputs: return .output(slot)
+        case .inputs2: return slot < ES9.mixerInputCount - 8 ? .input(slot + 8) : nil
+        case .outputs: return slot < ES9.audioJackCount ? .output(slot) : nil
         }
     }
 }
@@ -76,7 +76,7 @@ public struct ControlMapping: Codable, Equatable {
         + (0..<8).map { "mute\($0)" }
         + (0..<8).map { "solo\($0)" }
         + (0..<8).map { "pan\($0)" }
-        + ["master", "headphones", "previous", "next"]
+        + ["master", "muteAll", "headphones", "previous", "next", "sceneNext"]
 
     public static func label(_ action: String) -> String {
         for (prefix, name) in [("fader", "Fader"), ("mute", "Mute"), ("solo", "Solo"), ("pan", "Pan")] {
@@ -84,7 +84,9 @@ public struct ControlMapping: Codable, Equatable {
                 return "\(name) \(index + 1)"
             }
             if action == "master" { return "Général" }
+            if action == "muteAll" { return "Mute général" }
             if action == "headphones" { return "Casque" }
+            if action == "sceneNext" { return "Sous-scène suivante" }
         }
         return action == "previous" ? "Banque précédente" : "Banque suivante"
     }

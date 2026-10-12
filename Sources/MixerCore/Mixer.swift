@@ -87,7 +87,10 @@ public struct Channel: Codable, Equatable, Identifiable {
 
     /// Zero is the stereo main; 1...8 are the mono jack outputs.
     public var destinations: [Int] {
-        (mainEnabled ? [0] : []) + jackSends.indices.filter { jackSends[$0].enabled }.map { $0 + 1 }
+        guard id != ES9.clockInputIndex else { return [] }
+        return (mainEnabled ? [0] : []) + jackSends.indices.filter {
+            $0 < ES9.audioJackCount && jackSends[$0].enabled
+        }.map { $0 + 1 }
     }
 
     public init(id: Int) {
@@ -173,8 +176,133 @@ public struct OutputChannel: Codable, Equatable, Identifiable {
     }
 }
 
+public struct LiveInputCue: Codable, Equatable {
+    public var enabled: Bool
+    public var level: Double
+    public var transitionSeconds: Double
+    public var jackSends: [JackSend]?
+
+    public init(enabled: Bool = true, level: Double = 0.7, transitionSeconds: Double = 3,
+                jackSends: [JackSend]? = nil) {
+        self.enabled = enabled
+        self.level = level
+        self.transitionSeconds = transitionSeconds
+        self.jackSends = jackSends
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled, level, transitionSeconds, jackSends
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try values.decode(Bool.self, forKey: .enabled)
+        level = try values.decode(Double.self, forKey: .level)
+        let duration = try values.decode(Double.self, forKey: .transitionSeconds)
+        guard duration.isFinite, (0...600).contains(duration) else {
+            throw MixerError.invalidSession
+        }
+        transitionSeconds = min(duration, 30)
+        jackSends = try values.decodeIfPresent([JackSend].self, forKey: .jackSends)
+    }
+
+    private static let transitionCurve = 1.6
+
+    public func transitionStartLevel(currentLevel: Double, currentlyMuted: Bool) -> Double {
+        if enabled { return transitionSeconds > 0 ? 0 : level }
+        return currentlyMuted ? 0 : currentLevel
+    }
+
+    public func transitionLevel(from startLevel: Double, after elapsed: Double) -> Double {
+        let progress = transitionSeconds == 0 ? 1 : min(1, max(0, elapsed / transitionSeconds))
+        let target = enabled ? level : 0
+        if progress >= 1 { return target }
+        // Rampe en gain avec une courbe en puissance : audible dès le début, et sans plateau
+        // en fin de transition (la sensation de volume est proche du logarithme du gain).
+        let startGain = Channel.gain(startLevel)
+        let targetGain = Channel.gain(target)
+        let shaped = targetGain >= startGain
+            ? pow(progress, Self.transitionCurve)
+            : 1 - pow(1 - progress, Self.transitionCurve)
+        let gain = startGain + (targetGain - startGain) * shaped
+        guard gain > 0 else { return 0 }
+        return min(1, max(0, (20 * log10(gain) + 60) / 60))
+    }
+}
+
+public struct LiveSubscene: Codable, Equatable, Identifiable {
+    public var id: UUID
+    public var name: String
+    public var durationSeconds: Int
+    public var inputs: [LiveInputCue]
+
+    public init(id: UUID = UUID(), name: String, durationSeconds: Int = 0, inputs: [LiveInputCue]) {
+        self.id = id
+        self.name = name
+        self.durationSeconds = durationSeconds
+        self.inputs = inputs
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, durationSeconds, inputs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        durationSeconds = try values.decodeIfPresent(Int.self, forKey: .durationSeconds) ?? 0
+        inputs = try values.decode([LiveInputCue].self, forKey: .inputs)
+    }
+}
+
+public struct LiveScene: Codable, Equatable, Identifiable {
+    public var id: UUID
+    public var name: String
+    public var subscenes: [LiveSubscene]
+    public var totalDurationSeconds: Int {
+        subscenes.reduce(0) { total, subscene in
+            let (sum, overflow) = total.addingReportingOverflow(subscene.durationSeconds)
+            return overflow ? Int.max : sum
+        }
+    }
+
+    public init(id: UUID = UUID(), name: String, subscenes: [LiveSubscene]) {
+        self.id = id
+        self.name = name
+        self.subscenes = subscenes
+    }
+}
+
+public enum LiveSequenceStep: Equatable {
+    case cue(sceneID: UUID, subsceneID: UUID)
+    case finished
+    case empty
+}
+
+public enum LiveSequence {
+    public static func next(in scenes: [LiveScene], after sceneID: UUID?, subsceneID: UUID?) -> LiveSequenceStep {
+        guard let firstScene = scenes.first, let firstSubscene = firstScene.subscenes.first else { return .empty }
+        guard let sceneID, let subsceneID,
+              let sceneIndex = scenes.firstIndex(where: { $0.id == sceneID }),
+              let subsceneIndex = scenes[sceneIndex].subscenes.firstIndex(where: { $0.id == subsceneID }) else {
+            return .cue(sceneID: firstScene.id, subsceneID: firstSubscene.id)
+        }
+        let scene = scenes[sceneIndex]
+        if subsceneIndex + 1 < scene.subscenes.count {
+            return .cue(sceneID: scene.id, subsceneID: scene.subscenes[subsceneIndex + 1].id)
+        }
+        if sceneIndex + 1 < scenes.count, let next = scenes[sceneIndex + 1].subscenes.first {
+            return .cue(sceneID: scenes[sceneIndex + 1].id, subsceneID: next.id)
+        }
+        return .finished
+    }
+}
+
 public struct Session: Codable, Equatable {
     public var channels: [Channel]
+    public var consoleInputOrder: [Int]
+    public var stripInputs: [Int]
     public var outputs: [OutputChannel]
     public var routingLocked: Bool
     public var master: Double
@@ -183,9 +311,12 @@ public struct Session: Codable, Equatable {
     public var headphonesEnabled: Bool
     public var headphonesLevel: Double
     public var muteAll: Bool
+    public var liveScenes: [LiveScene]
 
     public init() {
         channels = (0..<14).map(Channel.init)
+        consoleInputOrder = Array(0..<14)
+        stripInputs = [9, 10, 11, 12]
         outputs = (0..<8).map(OutputChannel.init)
         routingLocked = true
         master = 0.8
@@ -194,15 +325,20 @@ public struct Session: Codable, Equatable {
         headphonesEnabled = false
         headphonesLevel = 42.0 / 72.0
         muteAll = false
+        liveScenes = []
     }
 
     private enum CodingKeys: String, CodingKey {
         case channels, outputs, routingLocked, master, masterMuted, mappings, headphonesEnabled, headphonesLevel, muteAll
+        case consoleInputOrder, stripInputs, liveScenes
     }
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         channels = try values.decode([Channel].self, forKey: .channels)
+        consoleInputOrder = try values.decodeIfPresent([Int].self, forKey: .consoleInputOrder) ?? Array(0..<14)
+        stripInputs = (try values.decodeIfPresent([Int].self, forKey: .stripInputs) ?? [9, 10, 11, 12])
+            .map { $0 == ES9.clockInputIndex ? 0 : $0 }
         outputs = try values.decodeIfPresent([OutputChannel].self, forKey: .outputs)
             ?? (0..<8).map(OutputChannel.init)
         routingLocked = try values.decodeIfPresent(Bool.self, forKey: .routingLocked) ?? true
@@ -212,6 +348,42 @@ public struct Session: Codable, Equatable {
         headphonesEnabled = try values.decodeIfPresent(Bool.self, forKey: .headphonesEnabled) ?? false
         headphonesLevel = try values.decodeIfPresent(Double.self, forKey: .headphonesLevel) ?? 42.0 / 72.0
         muteAll = try values.decodeIfPresent(Bool.self, forKey: .muteAll) ?? false
+        liveScenes = try values.decodeIfPresent([LiveScene].self, forKey: .liveScenes) ?? []
+    }
+
+    public mutating func moveConsoleInput(from source: Int, to destination: Int) throws {
+        try validate()
+        consoleInputOrder = try Self.moving(consoleInputOrder, from: source, to: destination)
+    }
+
+    public func applyingLiveRouting(_ subscene: LiveSubscene) throws -> Session {
+        try validate()
+        var candidate = self
+        guard subscene.inputs.count == channels.count else { throw MixerError.invalidSession }
+        for input in channels.indices {
+            if let sends = subscene.inputs[input].jackSends {
+                guard sends.count == 4, sends.allSatisfy({
+                    $0.level.isFinite && (0...1).contains($0.level)
+                }) else { throw MixerError.invalidSession }
+                candidate.channels[input].jackSends.replaceSubrange(0..<4, with: sends)
+            }
+        }
+        _ = try RoutingPlan(candidate)
+        return candidate
+    }
+
+    public mutating func moveStripInput(from source: Int, to destination: Int) throws {
+        try validate()
+        stripInputs = try Self.moving(stripInputs, from: source, to: destination)
+    }
+
+    private static func moving(_ inputs: [Int], from source: Int, to destination: Int) throws -> [Int] {
+        guard inputs.indices.contains(source), inputs.indices.contains(destination) else {
+            throw MixerError.invalidSession
+        }
+        var reordered = inputs
+        reordered.insert(reordered.remove(at: source), at: destination)
+        return reordered
     }
 
     public static func headphonesGain(_ level: Double) -> Double {
@@ -223,17 +395,22 @@ public struct Session: Codable, Equatable {
     }
 
     public func inputIsAudible(_ index: Int) -> Bool {
+        guard index != ES9.clockInputIndex else { return false }
         let channel = channels[index]
-        return !muteAll && !channel.muted && (!channels.contains(where: \.soloed) || channel.soloed)
+        return !muteAll && !channel.muted
+            && (!channels.prefix(ES9.clockInputIndex).contains(where: \.soloed) || channel.soloed)
     }
 
     public func outputIsAudible(_ index: Int) -> Bool {
         let output = outputs[index]
-        return !output.muted && (!outputs.contains(where: \.soloed) || output.soloed)
+        return index < ES9.audioJackCount && !output.muted
+            && (!outputs.prefix(ES9.audioJackCount).contains(where: \.soloed) || output.soloed)
     }
 
     public func validate() throws {
         guard channels.count == 14, channels.map(\.id) == Array(0..<14),
+              consoleInputOrder.count == 14, Set(consoleInputOrder) == Set(0..<14),
+              stripInputs.count == 4, stripInputs.allSatisfy({ (0..<14).contains($0) }),
               outputs.count == 8, outputs.map(\.id) == Array(0..<8),
               outputs.allSatisfy({ $0.level.isFinite && (0...1).contains($0.level) }),
               master.isFinite, (0...1).contains(master),
@@ -245,6 +422,29 @@ public struct Session: Codable, Equatable {
                   && $0.jackSends.allSatisfy { $0.level.isFinite && (0...1).contains($0.level) }
                   && $0.trim.isFinite && Channel.trimLimits.contains($0.trim)
                   && $0.eq.isValid
+              }),
+              liveScenes.count <= 128,
+              Set(liveScenes.map(\.id)).count == liveScenes.count,
+              liveScenes.allSatisfy({ scene in
+                  !scene.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                  && scene.name.count <= 80
+                  && !scene.subscenes.isEmpty && scene.subscenes.count <= 128
+                  && Set(scene.subscenes.map(\.id)).count == scene.subscenes.count
+                  && scene.subscenes.allSatisfy({ subscene in
+                      !subscene.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      && subscene.name.count <= 80
+                      && subscene.durationSeconds >= 0
+                      && subscene.inputs.count == 14
+                      && subscene.inputs.allSatisfy({
+                          $0.level.isFinite && (0...1).contains($0.level)
+                          && $0.transitionSeconds.isFinite && (0...30).contains($0.transitionSeconds)
+                          && ($0.jackSends.map { sends in
+                              sends.count == 4 && sends.allSatisfy {
+                                  $0.level.isFinite && (0...1).contains($0.level)
+                              }
+                          } ?? true)
+                      })
+                  })
               }),
               mappings.allSatisfy({ $0.isValid }),
               Set(mappings.map(\.action)).count == mappings.count,
@@ -297,6 +497,9 @@ public struct DSPUsage: Equatable {
 }
 
 public enum ES9 {
+    public static let audioJackCount = 7
+    public static let clockInputIndex = 13
+    public static let mixerInputCount = clockInputIndex
     public static let header: [UInt8] = [0xF0, 0x00, 0x21, 0x27, 0x19]
     public static let analogInputs: [UInt8] =
         [0x78, 0x79, 0x76, 0x75, 0x74, 0x7B, 0x7A, 0x77, 0x73, 0x72, 0x7D, 0x7C, 0x7E, 0x7F]
@@ -438,7 +641,8 @@ public struct RoutingPlan: Equatable {
             for (column, index) in group.enumerated() {
                 let eq = session.channels[index].eq
                 for (band, settings) in eq.bands.enumerated() {
-                    filters[block * 32 + column * 4 + band] = ES9EQ.filterWords(settings, enabled: eq.enabled)
+                    filters[block * 32 + column * 4 + band] = ES9EQ.filterWords(
+                        settings, enabled: eq.enabled && index != ES9.clockInputIndex)
                 }
             }
         }
@@ -479,7 +683,7 @@ public struct RoutingPlan: Equatable {
                         }
                     }
                 }
-                for outputIndex in 0..<8 where channel.jackSends[outputIndex].enabled {
+                for outputIndex in 0..<ES9.audioJackCount where channel.jackSends[outputIndex].enabled {
                     if session.outputIsAudible(outputIndex), let target = rows[outputIndex + 1] {
                         let outputGain = Channel.gain(session.outputs[outputIndex].level)
                         let sendGain = Channel.gain(channel.jackSends[outputIndex].level)

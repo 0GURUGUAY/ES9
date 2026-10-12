@@ -46,6 +46,10 @@ let suite = MixerCoreTests()
 let tests: [(String, () throws -> Void)] = [
     ("Master mute isolates main mix and preserves session state", suite.testMasterMuteIsIndependent),
     ("Mute all preserves routing, individual mutes, solos and session state", suite.testMuteAllPreservesIndividualStateAndRouting),
+    ("Live scene validation and persistence", suite.testLiveSceneValidationAndPersistence),
+    ("Live routing recall and migration", suite.testLiveRoutingRecallAndMigration),
+    ("Live input fade-in and fade-out", suite.testLiveInputFadeInAndFadeOut),
+    ("Live sequence advances and holds at end", suite.testLiveSequenceAdvancesAndHoldsAtEnd),
     ("DSP usage request, decoding and fragmented response", suite.testDSPUsageProtocol),
     ("Stereo mix and master", suite.testDefaultStereoMixAndMaster),
     ("Stereo plus six mono outputs", suite.testSevenInputsCoverStereoAndSixMonoOutputs),
@@ -72,7 +76,7 @@ let tests: [(String, () throws -> Void)] = [
     ("Combined input and output gain", suite.testCombinedInputAndOutputGain),
     ("Mixer session migration and output validation", suite.testMixerSessionMigrationAndOutputValidation),
     ("Controller output bank and new mappings", suite.testControllerOutputBankAndNewMappings),
-    ("Full matrix: 112 simultaneous connections", suite.testFullMatrixAll112Connections),
+    ("Full matrix: 91 simultaneous audio connections", suite.testFullMatrixAll91Connections),
     ("Matrix independent sends and buses", suite.testMatrixIndependentSendsAndBuses),
     ("Matrix gains preserve routing", suite.testMatrixGainDeltasKeepRoutingAllocated),
     ("Matrix capacity and redistribution", suite.testMatrixCapacityAndRedistribution),
@@ -80,7 +84,10 @@ let tests: [(String, () throws -> Void)] = [
     ("Matrix validation and disconnected inputs", suite.testMatrixSendValidationAndDisconnectedInput),
     ("Strip EQ encoding and addressing", suite.testStripEQEncodingAndAddressing),
     ("Strip EQ follows redistributed inputs", suite.testStripEQFollowsRedistributedInput),
-    ("Strip trim gain and session migration", suite.testStripTrimGainAndMigration)
+    ("Strip trim gain and session migration", suite.testStripTrimGainAndMigration),
+    ("Input display order preserves audio and identity", suite.testInputDisplayOrderPreservesAudioAndIdentity),
+    ("Input display order persistence and migration", suite.testInputDisplayOrderPersistenceAndMigration),
+    ("Input display order validation", suite.testInputDisplayOrderValidation)
 ]
 
 for (name, test) in tests {

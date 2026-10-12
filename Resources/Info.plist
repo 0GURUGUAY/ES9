@@ -12,5 +12,14 @@
     <key>CFBundleVersion</key><string>2</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key><string>com.es9mixer.input-strip</string>
+            <key>UTTypeDescription</key><string>ES-9 Mixer input strip</string>
+            <key>UTTypeConformsTo</key>
+            <array><string>public.data</string></array>
+        </dict>
+    </array>
 </dict>
 </plist>

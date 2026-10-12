@@ -49,7 +49,7 @@ struct MixerCommands: Commands {
         CommandMenu("ES-9") {
             Button(store.active ? "Mode Direct" : "Mode Démonstration") {}
                 .disabled(true)
-            Toggle("MUTE ALL", isOn: Binding(
+            Toggle("MUTE GÉNÉRAL", isOn: Binding(
                 get: { store.session.muteAll },
                 set: { value in
                     if value != store.session.muteAll { store.toggleMuteAll() }
